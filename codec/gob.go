@@ -53,8 +53,7 @@ func (g *GobCodec) Write(header *Header, body interface{}) (err error) {
 	return nil
 }
 
-//将 nil 转换为 GobCodec 结构体 ，并赋值给 Codec 接口，
-//来证明 GobCodec 实现了 Codec
+// Codec ，将 nil 转换为 GobCodec 结构体 ，并赋值给 Codec 接口， 来证明 GobCodec 实现了 Codec
 var _ Codec = (*GobCodec)(nil)
 
 func NewGobCodec(conn io.ReadWriteCloser) Codec {
