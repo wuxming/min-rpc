@@ -17,7 +17,6 @@ func (f Foo) Sum(args Args, reply *int) error {
 	return nil
 }
 
-//非暴露方法
 func (f Foo) sum(args Args, reply *int) error {
 	*reply = args.num1 + args.num2
 	return nil

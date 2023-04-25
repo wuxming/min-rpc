@@ -1,7 +1,6 @@
 package min_rpc
 
 import (
-	"fmt"
 	"go/ast"
 	"log"
 	"reflect"
@@ -29,7 +28,6 @@ func (m *methodType) newArgv() reflect.Value {
 		//生成指针 反射对象，取值
 		argv = reflect.New(m.ArgType).Elem()
 	}
-	fmt.Println(argv.Kind())
 	return argv
 }
 func (m *methodType) newReplyv() reflect.Value {
@@ -61,10 +59,10 @@ func newService(rcvr interface{}) *service {
 	if !ast.IsExported(s.name) {
 		log.Fatalf("rpc server: %s is not a valid service name", s.name)
 	}
-	s.regiserMethods()
+	s.registerMethods()
 	return s
 }
-func (s *service) regiserMethods() {
+func (s *service) registerMethods() {
 	s.method = make(map[string]*methodType)
 	for i := 0; i < s.typ.NumMethod(); i++ {
 		method := s.typ.Method(i)
@@ -90,7 +88,7 @@ func (s *service) regiserMethods() {
 	}
 }
 
-//判断是否是 暴露或则是内置的
+// isExportedOrBuiltinType 判断是否是 暴露或则是内置的
 func isExportedOrBuiltinType(t reflect.Type) bool {
 	return ast.IsExported(t.Name()) || t.PkgPath() == ""
 }

@@ -116,7 +116,9 @@ var ErrrShutdown = errors.New("connection is shut down")
 // Close 关闭连接
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Lock()
+	defer func() {
+		c.mu.Unlock()
+	}()
 	if c.closing {
 		return ErrrShutdown
 	}
@@ -170,7 +172,7 @@ func (c *Client) send(call *Call) {
 	c.header.ServiceMethod = call.ServiceMethod
 	c.header.Seq = seq
 	c.header.Error = ""
-	if err = c.cc.Write(&c.header, call.Args); err != nil {
+	if err = c.cc.Write(&(c.header), call.Args); err != nil {
 		//写入失败，移出pending map，放到异步调用队列
 		callTorm := c.removeCall(seq)
 		if callTorm != nil {
