@@ -2,11 +2,12 @@ package min_rpc
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/wuxming/min/codec"
@@ -25,7 +26,9 @@ var DefaultOption = &Option{
 	CodecType:   codec.GobType,
 }
 
-type Server struct{}
+type Server struct {
+	serviceMap sync.Map
+}
 
 func NewServer() *Server {
 	return &Server{}
@@ -71,6 +74,37 @@ func (s *Server) ServeConn(conn io.ReadWriteCloser) {
 	//处理 Option 后面的数据流
 	s.serveCodec(f(conn))
 }
+func Register(rcvr interface{}) error {
+	return DefaultServer.Register(rcvr)
+}
+func (s *Server) Register(rcvr interface{}) error {
+	svc := newService(rcvr)
+	if _, dup := s.serviceMap.LoadOrStore(svc.name, svc); dup {
+		return errors.New("rpc：service already defined：" + svc.name)
+	}
+	return nil
+}
+
+func (s *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
+	//逗号分割
+	dot := strings.LastIndex(serviceMethod, ".")
+	if dot < 0 {
+		err = errors.New("rpc server:service/method request 不符合规范 " + serviceMethod)
+	}
+	servicName, methodname := serviceMethod[:dot], serviceMethod[dot+1:]
+	//加载服务
+	svci, ok := s.serviceMap.Load(servicName)
+	if !ok {
+		err = errors.New("rpc server: 未找到服务 " + servicName)
+	}
+	svc = svci.(*service)
+	//加载方法
+	mtype = svc.method[methodname]
+	if mtype == nil {
+		err = errors.New("rpc server: 未找到方法 " + servicName)
+	}
+	return
+}
 
 // errorRequest 空结构体占位错误请求体
 var errorRequest = struct{}{}
@@ -107,6 +141,8 @@ func (s *Server) serveCodec(cc codec.Codec) {
 type request struct {
 	h            *codec.Header //请求头
 	argv, replyv reflect.Value //请求的命令和回复
+	mtype        *methodType
+	svc          *service
 }
 
 // readRequset 读取请求
@@ -116,11 +152,22 @@ func (s *Server) readRequset(cc codec.Codec) (*request, error) {
 		return nil, err
 	}
 	req := &request{h: h}
-	//晦涩难懂，
-	req.argv = reflect.New(reflect.TypeOf("")) //返回字符串零值 指针类型的反射对象
-	//转换为指针实例赋值
-	if err := cc.ReadBody(req.argv.Interface()); err != nil {
+	//查询服务对应的方法
+	req.svc, req.mtype, err = s.findService(h.ServiceMethod)
+	if err != nil {
+		return req, err
+	}
+
+	req.argv = req.mtype.newArgv()
+	req.replyv = req.mtype.newReplyv()
+	argvi := req.argv.Interface()
+	//确保 argvi 是指针
+	if req.argv.Type().Kind() != reflect.Ptr {
+		argvi = req.argv.Addr().Interface()
+	}
+	if err = cc.ReadBody(argvi); err != nil {
 		log.Println("rpc server: read argv err:", err)
+		return req, err
 	}
 	// reflect.New(reflect.TypeOf(""))
 	//      ||
@@ -133,9 +180,10 @@ func (s *Server) readRequset(cc codec.Codec) (*request, error) {
 // readRequestHeader 读取请求头
 func (s *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
 	var h codec.Header
+	// todo 错误的服务读了两遍，并且会报这个错误,待解决
 	if err := cc.ReadHeader(&h); err != nil {
 		if err != io.EOF && err != io.ErrUnexpectedEOF {
-			log.Println("rpc server: read header error:", err)
+			log.Println("rpc server: read header error！！！！！！:", err)
 		}
 		return nil, err
 	}
@@ -152,7 +200,11 @@ func (s *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{},
 }
 func (s *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
 	defer wg.Done()
-	log.Println(req.h, req.argv.Elem())
-	req.replyv = reflect.ValueOf(fmt.Sprintf("resp %d", req.h.Seq))
+	err := req.svc.call(req.mtype, req.argv, req.replyv)
+	if err != nil {
+		req.h.Error = err.Error()
+		s.sendResponse(cc, req.h, errorRequest, sending)
+		return
+	}
 	s.sendResponse(cc, req.h, req.replyv.Interface(), sending)
 }

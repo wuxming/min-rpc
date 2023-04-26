@@ -1,16 +1,28 @@
 package min_rpc
 
 import (
-	"encoding/json"
-	"fmt"
 	"log"
 	"net"
+	"sync"
 	"testing"
-
-	"github.com/wuxming/min/codec"
 )
 
+type Fo int
+type Arg struct {
+	Num1 int
+	Num2 int
+}
+
+func (f Fo) Sum(arg Arg, relpy *int) error {
+	*relpy = arg.Num1 + arg.Num2
+	return nil
+}
 func startServe(addr chan string) {
+	var fo Fo
+	//服务注册
+	if err := Register(&fo); err != nil {
+		log.Fatal("register error:", err)
+	}
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		log.Fatal("network error:", err)
@@ -20,21 +32,29 @@ func startServe(addr chan string) {
 	Accept(l)
 }
 func TestServer_ServeConn(t *testing.T) {
+	log.SetFlags(0)
 	addr := make(chan string)
 	go startServe(addr)
-	conn, _ := net.Dial("tcp", <-addr)
-	//发送 option
-	_ = json.NewEncoder(conn).Encode(DefaultOption)
-	cc := codec.NewGobCodec(conn)
+	client, _ := Dial("tcp", <-addr)
+	defer func() {
+		_ = client.Close()
+	}()
+	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
-		h := &codec.Header{
-			ServiceMethod: "FOO.sum",
-			Seq:           uint64(i),
-		}
-		_ = cc.Write(h, fmt.Sprintf("geerpc req %d", h.Seq))
-		_ = cc.ReadHeader(h)
-		var reply string
-		_ = cc.ReadBody(&reply)
-		log.Println("reply:", reply)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			args := &Arg{
+				Num1: i,
+				Num2: i,
+			}
+			var reply int
+			err := client.Call("Fo.Sum", args, &reply)
+			if err != nil {
+				log.Fatal("调用Fo.Sum失败 ", err.Error())
+			}
+			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
+		}(i)
 	}
+	wg.Wait()
 }
