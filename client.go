@@ -1,6 +1,7 @@
 package min_rpc
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/wuxming/min/codec"
 )
@@ -41,24 +43,48 @@ type Client struct {
 
 //--------------------------- 连接 rpc 服务器  ---------------------------------------------
 
-// Dial 连接指定网络地址的 rpc 服务器
-func Dial(network, addres string, opts ...*Option) (client *Client, err error) {
-	//这个目的是 opt 可有可无，有则必须是一个
+type clientResult struct {
+	client *Client
+	err    error
+}
+
+type newClientFunc func(conn net.Conn, option *Option) (client *Client, err error)
+
+func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (client *Client, err error) {
 	opt, err := parseOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.Dial(network, addres)
+	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
 	if err != nil {
 		return nil, err
 	}
-	//关闭连接
 	defer func() {
-		if client == nil {
+		if err != nil {
 			_ = conn.Close()
 		}
 	}()
-	return NewClient(conn, opt)
+	ch := make(chan clientResult)
+	go func() {
+		client, err := f(conn, opt)
+		ch <- clientResult{client: client, err: err}
+	}()
+	if opt.ConnectTimeout == 0 {
+		result := <-ch
+		return result.client, result.err
+	}
+	select {
+	case <-time.After(opt.ConnectTimeout):
+		return nil, fmt.Errorf("rpc client: connect timeout: expect within %s", opt.ConnectTimeout)
+	case result := <-ch:
+		return result.client, result.err
+	}
+
+}
+
+// Dial 连接指定网络地址的 rpc 服务器
+func Dial(network, addres string, opts ...*Option) (client *Client, err error) {
+	return dialTimeout(NewClient, network, addres, opts...)
 }
 
 // 解析 options
@@ -136,9 +162,16 @@ func (c *Client) IsAvailable() bool {
 //--------------------------- 发送 rpc 请求  ---------------------------------------------
 
 // Call 同步接口
-func (c *Client) Call(serviceMethod string, args, reply interface{}) error {
-	call := <-c.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+func (c *Client) Call(ctx context.Context, serviceMethod string, args, reply interface{}) error {
+	call := c.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		c.removeCall(call.Seq)
+		return errors.New("rpc client: call failed: " + ctx.Err().Error())
+	case call := <-call.Done:
+		return call.Error
+	}
+
 }
 
 // Go 异步接口

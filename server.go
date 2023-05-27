@@ -3,12 +3,14 @@ package min_rpc
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wuxming/min/codec"
 )
@@ -17,13 +19,16 @@ const MagicNumber = 0x3b5f5c
 
 // Option 编解码方式
 type Option struct {
-	MagicNumber int //秘钥，标记这是
-	CodecType   codec.Type
+	MagicNumber    int //秘钥，标记这是
+	CodecType      codec.Type
+	ConnectTimeout time.Duration //连接超市
+	HandleTimeout  time.Duration //服务端处理超市
 }
 
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodecType:   codec.GobType,
+	MagicNumber:    MagicNumber,
+	CodecType:      codec.GobType,
+	ConnectTimeout: time.Second * 10,
 }
 
 type Server struct {
@@ -129,7 +134,7 @@ func (s *Server) serveCodec(cc codec.Codec) {
 			continue
 		}
 		wg.Add(1)
-		go s.handleRequest(cc, req, sending, wg)
+		go s.handleRequest(cc, req, sending, wg, time.Second*10)
 	}
 
 	//连接报错，退出循环，等待协中的其他任务完成
@@ -198,13 +203,32 @@ func (s *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{},
 		log.Println("rpc server: write response error:", err)
 	}
 }
-func (s *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
+func (s *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	err := req.svc.call(req.mtype, req.argv, req.replyv)
-	if err != nil {
-		req.h.Error = err.Error()
-		s.sendResponse(cc, req.h, errorRequest, sending)
+	called := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		err := req.svc.call(req.mtype, req.argv, req.replyv)
+		called <- struct{}{}
+		if err != nil {
+			req.h.Error = err.Error()
+			s.sendResponse(cc, req.h, errorRequest, sending)
+			sent <- struct{}{}
+			return
+		}
+		s.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
+	}()
+	if timeout == 0 {
+		<-called
+		<-sent
 		return
 	}
-	s.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+	select {
+	case <-time.After(timeout):
+		req.h.Error = fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout)
+		s.sendResponse(cc, req.h, errorRequest, sending)
+	case <-called:
+		<-sent
+	}
 }
